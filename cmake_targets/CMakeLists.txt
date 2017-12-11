@@ -1654,7 +1654,7 @@ if(EXISTS "/usr/include/atlas/cblas.h" OR EXISTS "/usr/include/cblas.h")
      list(APPEND ATLAS_LIBRARIES atlas) #Case for Ubuntu
   endif()
 
-  list(APPEND ATLAS_LIBRARIES lapack)
+  list(APPEND ATLAS_LIBRARIES lapack_atlas)
 else()
   message("No Blas/Atlas libs found, some targets will fail")
 endif()

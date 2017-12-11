@@ -95,8 +95,8 @@ get_distribution_release() {
 check_supported_distribution() {
     local distribution=$(get_distribution_release)
     case "$distribution" in
+        "ubuntu17.04") return 0 ;;
         "ubuntu16.04") return 0 ;;
-        "ubuntu14.04") return 0 ;;
         "fedora24")    return 0 ;;
         "rhel7")       return 0 ;;
         "centos7")     return 0 ;;
@@ -481,14 +481,11 @@ check_install_oai_software() {
   if [[ "$OS_DISTRO" == "ubuntu" ]]; then
     $SUDO apt install -y software-properties-common
     case "$(get_distribution_release)" in
-        "ubuntu14.04")
-            specific_packages="libtasn1-3-dev"
-            # For iperf3
-            $SUDO add-apt-repository "deb http://archive.ubuntu.com/ubuntu trusty-backports universe"
-            $SUDO apt-get update
+        "ubuntu17.04")
+            specific_packages="libgnutls28-dev"
             ;;
         "ubuntu16.04")
-            specific_packages="libtasn1-6-dev"
+            specific_packages="libgnutls-dev"
             ;;
     esac
     $SUDO apt-get install -y \
@@ -504,7 +501,7 @@ check_install_oai_software() {
 	texlive-latex-base \
 	ethtool \
 	flex  \
-	gccxml \
+	castxml \
 	gdb  \
 	git \
 	graphviz \
@@ -551,17 +548,11 @@ check_install_oai_software() {
 	pydb \
 	libyaml-dev \
 	wget \
-	libxpm-dev
+	libxpm-dev \
+        nettle-bin nettle-dev libgnutls28-dev
 
     $SUDO update-alternatives --set liblapack.so /usr/lib/atlas-base/atlas/liblapack.so
     
-    #Remove old gnutls/nettle installation that was done from sources
-    remove_nettle_from_source
-    
-    $SUDO apt-get install -y nettle-dev nettle-bin
-    remove_gnutls_from_source
-
-    $SUDO apt-get install -y libgnutls-dev
   elif [[ "$OS_BASEDISTRO" == "fedora" ]]; then
     if [[ "$OS_DISTRO" == "rhel" ]] || [[ "$OS_DISTRO" == "centos" ]]; then
       if rpm -q epel-release > /dev/null; then
@@ -647,55 +638,6 @@ check_install_oai_software() {
     $SUDO git clone https://gist.github.com/2190472.git /opt/ssh
 }
 
-### Remove Nettle installation which was done from sources (only done for Ubuntu Distro)
-remove_nettle_from_source() {
-    nettle_uninstall_log=$OPENAIR_DIR/cmake_targets/log/nettle_uninstall_log.txt
-    echo_info "\nUn-Installing Nettle from sources. The log file for nettle un-installation is here: $nettle_uninstall_log "
-    (
-    $SUDO apt-get remove -y nettle-dev nettle-bin 
-    cd /tmp
-    echo "Downloading nettle archive"
-    $SUDO rm -rf /tmp/nettle-2.5.tar.gz* /tmp/nettle-2.5
-    wget https://ftp.gnu.org/gnu/nettle/nettle-2.5.tar.gz
-    if [ $? -ne 0 ]; then
-      wget ftp://ftp.lysator.liu.se/pub/security/lsh/nettle-2.5.tar.gz
-    fi
-    if [ ! -f nettle-2.5.tar.gz ]; then
-      echo_error "Could not download nettle source files"
-      cd -
-      return
-    fi
-    tar -xzf nettle-2.5.tar.gz
-    cd nettle-2.5/
-    ./configure --disable-openssl --enable-shared --prefix=/usr 
-    $SUDO make uninstall || true 
-    $SUDO ldconfig
-    ) >& $nettle_uninstall_log
-}
-
-### Remove Gnutls from source (Only done for Ubuntu Distro)
-remove_gnutls_from_source(){
-    gnutls_uninstall_log=$OPENAIR_DIR/cmake_targets/log/gnutls_uninstall_log.txt
-    echo_info "\nUn-Installing Gnutls. The log file for Gnutls un-installation is here: $gnutls_uninstall_log "
-    (
-    $SUDO apt-get remove -y libgnutls-dev
-    cd /tmp 
-    echo "Downloading gnutls archive"
-    $SUDO rm -rf /tmp/gnutls-3.1.23.tar.xz* /tmp/gnutls-3.1.23
-    wget http://mirrors.dotsrc.org/gcrypt/gnutls/v3.1/gnutls-3.1.23.tar.xz || \
-      wget ftp://ftp.gnutls.org/gcrypt/gnutls/v3.1/gnutls-3.1.23.tar.xz
-    if [ ! -f gnutls-3.1.23.tar.xz ]; then
-      echo_error "Could not download gnutls source files"
-      cd -
-      return
-    fi
-    tar -xJf gnutls-3.1.23.tar.xz
-    cd gnutls-3.1.23/
-    ./configure --prefix=/usr
-    $SUDO make uninstall || true
-    $SUDO ldconfig
-    )>& $gnutls_uninstall_log
-}
 
 install_asn1c_from_source(){
     asn1_install_log=$OPENAIR_DIR/cmake_targets/log/asn1c_install_log.txt
