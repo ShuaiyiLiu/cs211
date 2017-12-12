@@ -106,6 +106,38 @@ typedef struct ue_extra_config_s {
 ue_extra_config_t ue_new_config;
 ue_extra_config_t ue_ori_config;
 
+typedef struct misc_config_s {
+    uint32_t network_delay;
+    uint32_t dl_speed;
+    uint32_t is_original;
+} misc_config_t;
+misc_config_t misc_config;
+
+typedef enum {
+    RXTX_IDLE = 0,
+    RXTX_RECVING,
+    INACTIVE_DRX,
+    INACTIVE_RX,
+    PSM
+} original_state_t;
+
+typedef struct state_timer_s {
+    uint32_t cycle_timer;
+    uint32_t rxtx_timer;
+    uint32_t inactive_timer;
+    uint32_t inactive_edrx_timer;
+    uint32_t inactive_rx_timer;
+    uint32_t psm_timer;
+} state_timer_t;
+
+struct packet_schedule {
+    int time;
+    int size;
+};
+
+struct packet_schedule ps[100];
+int ps_size = 0;
+
 static const eutra_band_t eutra_bands[] = {
     { 1, 1920    * MHz, 1980    * MHz, 2110    * MHz, 2170    * MHz, FDD},
     { 2, 1850    * MHz, 1910    * MHz, 1930    * MHz, 1990    * MHz, FDD},
@@ -147,6 +179,7 @@ void read_extra_config(char *filename) {
     int val;
     for (int i = 0; i < lines; i++) {
         fscanf(pFile, "%s %s %d", ue_type, prop, &val);
+        printf("[UE1] %s %s %d\n", ue_type, prop, val);
         ue_extra_config_t *p = NULL;
         if (strcmp(ue_type, "new") == 0) {
             p = &ue_new_config;
@@ -168,7 +201,24 @@ void read_extra_config(char *filename) {
             p->e_length = val;
         }
     }
-    printf("ue_new_config: %d %d %d %d %d %d\n",
+    fclose(pFile);
+
+    pFile = fopen("misc.conf", "r"); /* should check the result */
+    fscanf(pFile, "%d", &lines);
+    printf("[UE1] lines %d\n", lines);
+    for (int i = 0; i < lines; i++) {
+        fscanf(pFile, "%s %d", prop, &val);
+        printf("[UE1] %s %d\n", prop, val);
+        if (strcmp(prop, "original") == 0) {
+            misc_config.is_original = val;
+        } else if (strcmp(prop, "delay") == 0) {
+            misc_config.network_delay = val;
+        } else if (strcmp(prop, "dl") == 0) {
+            misc_config.dl_speed = val;
+        }
+    }
+
+    printf("DEBUG-211: ue_new_config: %d %d %d %d %d %d\n",
             ue_new_config.psm_length,
             ue_new_config.cycle_length,
             ue_new_config.inactive_length,
@@ -177,6 +227,166 @@ void read_extra_config(char *filename) {
             ue_new_config.e_length
             );
     fclose(pFile);
+}
+
+int read_packet_schedule(char* filename) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp) {
+        return -1;
+    }
+    if (!fscanf(fp, "%d", &ps_size)) {
+        return -1;
+    }
+    int frames = 0;
+    int p_size = 0;
+    for (int i = 0; i < ps_size; i++) {
+        fscanf(fp, "%d %d", &frames, &p_size);
+        ps[i].time = frames;
+        ps[i].size = p_size;
+    }
+    fclose(fp);
+    return  0;
+}
+
+/* UE checks if this subframe contains paging message from eNB.
+ * Return true if it does. */
+bool is_paging_subframe(lte_subframe_t *lte_sf, int sf_idx) {
+    for (int i = 0; i < ps_size; i++) {
+        int t = ps[i].time + misc_config.network_delay;
+        if (t == sf_idx) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Get packet size from subframe index. If there is not packet
+ * at this subframe, return -1. */
+bool get_packet_size(lte_subframe_t *lte_sf, int sf_idx) {
+    for (int i = 0; i < ps_size; i++) {
+        int t = ps[i].time + misc_config.network_delay;
+        if (t == sf_idx) {
+            return ps[i].size;
+        }
+    }
+    return -1;
+}
+
+/* Return true if this ue is the sender. */
+bool is_sender_ue(PHY_VARS_UE *UE) {
+    return UE->Mod_id == 0;
+}
+
+/* Process sender ue at subframe sf_idx */
+void ue_tx_processing(int sf_idx) {
+    if (is_paging_subframe(NULL, sf_idx - misc_config.network_delay)) {
+        int sz = get_packet_size(NULL, sf_idx - misc_config.network_delay);
+        printf("[ES] [UE 0] [Subframe %d]: Sending packet of size %d bytes.\n",
+                sf_idx,
+                sz);
+    }
+}
+
+/* Pre-process for each original receiver state */
+void original_receiver_pre_processing(lte_subframe_t *lte_sf, UE_rxtx_proc_t *proc,
+        int *buffer_packets_size) {
+    if (is_paging_subframe(lte_sf, proc->subframe_rx + proc->frame_rx * 10)) {
+        *buffer_packets_size += get_packet_size(lte_sf, proc->subframe_rx + proc->frame_rx * 10);
+    }
+}
+
+/* Post-process for each post original receiver state */
+void original_receiver_post_processing(state_timer_t *timer, original_state_t *state) {
+    timer->cycle_timer--;
+    if (timer->cycle_timer == 0) {
+        timer->cycle_timer = ue_ori_config.cycle_length;
+        *state = RXTX_IDLE;
+        timer->rxtx_timer = ue_ori_config.cycle_length - ue_ori_config.psm_length - ue_ori_config.inactive_length;
+    }
+}
+
+/* Main state machine for original receiver.  */
+void original_receiver_state_func(UE_rxtx_proc_t *proc,
+        int *buffer_packets_size,
+        state_timer_t *timer,
+        original_state_t *state) {
+
+    original_receiver_pre_processing(NULL, proc, buffer_packets_size);
+    printf("[UE1] Timer: %d %d %d %d %d %d\n",
+            timer->cycle_timer,
+            timer->rxtx_timer,
+            timer->inactive_timer,
+            timer->inactive_edrx_timer,
+            timer->inactive_rx_timer,
+            timer->psm_timer
+            );
+    printf("[ES] [UE1] [Subframe %d] State: %d\n",
+            proc->subframe_rx + proc->frame_rx * 10,
+            *state);
+    switch(*state) {
+        case RXTX_IDLE:
+            if (*buffer_packets_size > 0) {
+                *state = RXTX_RECVING;
+                break;
+            }
+            timer->rxtx_timer--;
+            if (timer->rxtx_timer == 0) {
+                *state = INACTIVE_DRX;
+                timer->inactive_edrx_timer = ue_ori_config.edrx_length;
+                timer->inactive_timer = ue_ori_config.inactive_length;
+            }
+            break;
+        case RXTX_RECVING:
+            if (*buffer_packets_size < misc_config.dl_speed) {
+                *buffer_packets_size = 0;
+            } else {
+                *buffer_packets_size -= misc_config.dl_speed;
+            }
+            timer->rxtx_timer--;
+            if (timer->rxtx_timer < 0)
+                timer->rxtx_timer = 0;
+            if (*buffer_packets_size == 0 && timer->rxtx_timer == 0) {
+                *state = INACTIVE_DRX;
+                timer->inactive_timer = ue_ori_config.inactive_length;
+                timer->inactive_edrx_timer = ue_ori_config.edrx_length;
+            }
+            break;
+        case INACTIVE_DRX:
+            timer->inactive_timer--;
+            timer->inactive_edrx_timer--;
+            if (timer->inactive_timer == 0) {
+                *state = PSM;
+                timer->psm_timer = ue_ori_config.psm_length;
+            } else if (timer->inactive_edrx_timer == 0) {
+                *state = INACTIVE_RX;
+                timer->inactive_rx_timer = ue_ori_config.rx_length;
+            }
+            break;
+        case INACTIVE_RX:
+            if (*buffer_packets_size > 0) {
+                *state = RXTX_RECVING;
+                break;
+            }
+            timer->inactive_timer--;
+            timer->inactive_rx_timer--;
+            if (timer->inactive_timer == 0) {
+                *state = PSM;
+                timer->psm_timer = ue_ori_config.psm_length;
+            } else if (timer->inactive_rx_timer == 0) {
+                *state = INACTIVE_DRX;
+                timer->inactive_edrx_timer = ue_ori_config.edrx_length;
+            }
+            break;
+        case PSM:
+            timer->psm_timer--;
+            if (timer->psm_timer == 0) {
+                *state = RXTX_IDLE;
+                timer->rxtx_timer = ue_ori_config.cycle_length - ue_ori_config.psm_length - ue_ori_config.inactive_length;
+            }
+            break;
+    }
+
+    original_receiver_post_processing(timer, state);
 }
 
 void init_thread(int sched_runtime, int sched_deadline, int sched_fifo, cpu_set_t *cpuset, char * name) {
@@ -230,6 +440,9 @@ void init_thread(int sched_runtime, int sched_deadline, int sched_fifo, cpu_set_
 
 void init_UE(int nb_inst)
 {
+  read_extra_config("ue_extra.conf");
+  read_packet_schedule("packet_schedule.txt");
+
   int inst;
   for (inst=0; inst < nb_inst; inst++) {
     //    UE->rfdevice.type      = NONE_DEV;
@@ -722,6 +935,14 @@ void *UE_thread(void *arg) {
     int sub_frame=-1;
     //int cumulated_shift=0;
     AssertFatal(UE->rfdevice.trx_start_func(&UE->rfdevice) == 0, "Could not start the device\n");
+
+    /* Initialization for receiver */
+    state_timer_t timer;
+    int buffer_packets_size = 0;
+    original_state_t state = RXTX_IDLE;
+    timer.rxtx_timer = ue_ori_config.cycle_length - ue_ori_config.psm_length - ue_ori_config.inactive_length;
+    timer.cycle_timer = ue_ori_config.cycle_length;
+
     while (!oai_exit) {
         AssertFatal ( 0== pthread_mutex_lock(&UE->proc.mutex_synch), "");
         int instance_cnt_synch = UE->proc.instance_cnt_synch;
@@ -902,6 +1123,16 @@ void *UE_thread(void *arg) {
                                          UE->frame_parms.ofdm_symbol_size-UE->frame_parms.nb_prefix_samples0;
 
                     proc->instance_cnt_rxtx++;
+                    if (is_sender_ue(UE)) {
+                        ue_tx_processing(proc->subframe_rx + proc->frame_rx * 10);
+                    } else {
+                        if (misc_config.is_original) {
+                            // run original state machine
+                            original_receiver_state_func(proc, &buffer_packets_size, &timer, &state);
+                        } else {
+                            // TODO
+                        }
+                    }
                     LOG_D( PHY, "[SCHED][UE %d] UE RX instance_cnt_rxtx %d subframe %d !!\n", UE->Mod_id, proc->instance_cnt_rxtx,proc->subframe_rx);
                     if (proc->instance_cnt_rxtx == 0) {
                       if (pthread_cond_signal(&proc->cond_rxtx) != 0) {
@@ -920,6 +1151,7 @@ void *UE_thread(void *arg) {
                     initStaticTime(lastTime);
                     updateTimes(lastTime, &t1, 20000, "Delay between two IQ acquisitions (case 1)");
                     pickStaticTime(lastTime);
+
 
                 } else {
                     printf("Processing subframe %d",proc->subframe_rx);
@@ -945,7 +1177,6 @@ void *UE_thread(void *arg) {
  * and the locking between them.
  */
 void init_UE_threads(PHY_VARS_UE *UE) {
-    read_extra_config("ue_extra.conf");
     struct rx_tx_thread_data *rtd;
 
     pthread_attr_init (&UE->proc.attr_ue);
