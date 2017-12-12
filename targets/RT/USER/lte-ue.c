@@ -94,6 +94,18 @@ typedef struct band_info_s {
 
 band_info_t bands_to_scan;
 
+typedef struct ue_extra_config_s {
+    uint32_t psm_length;
+    uint32_t cycle_length;
+    uint32_t inactive_length;
+    uint32_t edrx_length;
+    uint32_t rx_length;
+    uint32_t e_length;
+} ue_extra_config_t;
+
+ue_extra_config_t ue_new_config;
+ue_extra_config_t ue_ori_config;
+
 static const eutra_band_t eutra_bands[] = {
     { 1, 1920    * MHz, 1980    * MHz, 2110    * MHz, 2170    * MHz, FDD},
     { 2, 1850    * MHz, 1910    * MHz, 1930    * MHz, 1990    * MHz, FDD},
@@ -125,6 +137,47 @@ static const eutra_band_t eutra_bands[] = {
     {43, 3600    * MHz, 3800    * MHz, 3600    * MHz, 3800    * MHz, TDD},
     {44, 703    * MHz, 803    * MHz, 703    * MHz, 803    * MHz, TDD},
 };
+
+void read_extra_config(char *filename) {
+    FILE* pFile = fopen(filename, "r"); /* should check the result */
+    int lines = 0;
+    char ue_type[255];
+    char prop[255];
+    fscanf(pFile, "%d", &lines);
+    int val;
+    for (int i = 0; i < lines; i++) {
+        fscanf(pFile, "%s %s %d", ue_type, prop, &val);
+        ue_extra_config_t *p = NULL;
+        if (strcmp(ue_type, "new") == 0) {
+            p = &ue_new_config;
+        } else {
+            p = &ue_ori_config;
+        }
+
+        if (strcmp(prop, "total") == 0) {
+            p->cycle_length = val;
+        } else if (strcmp(prop, "psm") == 0) {
+            p->psm_length = val;
+        } else if (strcmp(prop, "inactive") == 0) {
+            p->inactive_length = val;
+        } else if (strcmp(prop, "idle") == 0) {
+            p->edrx_length = val;
+        } else if (strcmp(prop, "rx") == 0) {
+            p->rx_length = val;
+        } else if (strcmp(prop, "e") == 0) {
+            p->e_length = val;
+        }
+    }
+    printf("ue_new_config: %d %d %d %d %d %d\n",
+            ue_new_config.psm_length,
+            ue_new_config.cycle_length,
+            ue_new_config.inactive_length,
+            ue_new_config.edrx_length,
+            ue_new_config.rx_length,
+            ue_new_config.e_length
+            );
+    fclose(pFile);
+}
 
 void init_thread(int sched_runtime, int sched_deadline, int sched_fifo, cpu_set_t *cpuset, char * name) {
 
@@ -892,6 +945,7 @@ void *UE_thread(void *arg) {
  * and the locking between them.
  */
 void init_UE_threads(PHY_VARS_UE *UE) {
+    read_extra_config("ue_extra.conf");
     struct rx_tx_thread_data *rtd;
 
     pthread_attr_init (&UE->proc.attr_ue);
