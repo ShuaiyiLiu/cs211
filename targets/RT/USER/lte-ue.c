@@ -113,21 +113,25 @@ typedef struct misc_config_s {
 } misc_config_t;
 misc_config_t misc_config;
 
-typedef enum {
+typedef enum
+{
     RXTX_IDLE = 0,
     RXTX_RECVING,
     INACTIVE_DRX,
     INACTIVE_RX,
-    PSM
-} original_state_t;
+    PSM,
+    ePSM
+} ps_state_t;
 
 typedef struct state_timer_s {
-    uint32_t cycle_timer;
-    uint32_t rxtx_timer;
-    uint32_t inactive_timer;
-    uint32_t inactive_edrx_timer;
-    uint32_t inactive_rx_timer;
-    uint32_t psm_timer;
+    int cycle_timer;
+    int rxtx_timer;
+    int inactive_timer;
+    int inactive_edrx_timer;
+    int inactive_rx_timer;
+    int psm_timer;
+    int epsm_timer;
+    int exp_scalar;
 } state_timer_t;
 
 struct packet_schedule {
@@ -296,7 +300,7 @@ void original_receiver_pre_processing(lte_subframe_t *lte_sf, UE_rxtx_proc_t *pr
 }
 
 /* Post-process for each post original receiver state */
-void original_receiver_post_processing(state_timer_t *timer, original_state_t *state) {
+void original_receiver_post_processing(state_timer_t *timer, ps_state_t *state) {
     timer->cycle_timer--;
     if (timer->cycle_timer == 0) {
         timer->cycle_timer = ue_ori_config.cycle_length;
@@ -309,20 +313,9 @@ void original_receiver_post_processing(state_timer_t *timer, original_state_t *s
 void original_receiver_state_func(UE_rxtx_proc_t *proc,
         int *buffer_packets_size,
         state_timer_t *timer,
-        original_state_t *state) {
+        ps_state_t *state) {
 
     original_receiver_pre_processing(NULL, proc, buffer_packets_size);
-    printf("[UE1] Timer: %d %d %d %d %d %d\n",
-            timer->cycle_timer,
-            timer->rxtx_timer,
-            timer->inactive_timer,
-            timer->inactive_edrx_timer,
-            timer->inactive_rx_timer,
-            timer->psm_timer
-            );
-    printf("[ES] [UE1] [Subframe %d] State: %d\n",
-            proc->subframe_rx + proc->frame_rx * 10,
-            *state);
     switch(*state) {
         case RXTX_IDLE:
             if (*buffer_packets_size > 0) {
@@ -384,9 +377,111 @@ void original_receiver_state_func(UE_rxtx_proc_t *proc,
                 timer->rxtx_timer = ue_ori_config.cycle_length - ue_ori_config.psm_length - ue_ori_config.inactive_length;
             }
             break;
+        default:
+            break;
     }
 
     original_receiver_post_processing(timer, state);
+}
+
+/* Preprocessing for receiver at each state */
+void new_receiver_pre_processing(lte_subframe_t *lte_sf, UE_rxtx_proc_t *proc,
+        int* buffer_packets_size) {
+    if (is_paging_subframe(lte_sf, proc->subframe_rx + proc->frame_rx * 10)) {
+        *buffer_packets_size += get_packet_size(lte_sf, proc->subframe_rx + proc->frame_rx * 10);
+    }
+}
+
+/* Post - processing for receiver at each state */
+void new_receiver_post_processing(state_timer_t* timer, ps_state_t *state) {
+    // cycle timer is assumed to be > 0 initially
+    timer->cycle_timer--;
+    if (timer->cycle_timer == 0) {
+        timer->cycle_timer = ue_new_config.cycle_length;
+        *state = RXTX_IDLE;
+        timer->rxtx_timer = ue_new_config.cycle_length - ue_new_config.psm_length;
+    }
+}
+
+/* State machine function for new solution */
+void new_receiver_state_func(UE_rxtx_proc_t *proc,
+        int *buffer_packets_size,
+        state_timer_t *timer,
+        ps_state_t *state) {
+    new_receiver_pre_processing(NULL, proc, buffer_packets_size);
+    switch(*state)
+    {
+        case RXTX_IDLE:
+            if (*buffer_packets_size > 0) {
+                *state = RXTX_RECVING;
+                break;
+            }
+            timer->rxtx_timer--;
+            if (timer->rxtx_timer == 0) {
+                *state = INACTIVE_DRX;
+                timer->exp_scalar = 1;
+                timer->inactive_edrx_timer = ue_new_config.edrx_length;
+                timer->inactive_timer = ue_new_config.inactive_length;
+            }
+            break;
+        case RXTX_RECVING:
+            if (*buffer_packets_size < misc_config.dl_speed) {
+                *buffer_packets_size = 0;
+            } else {
+                *buffer_packets_size -= misc_config.dl_speed;
+            }
+            timer->rxtx_timer--;
+            if (timer->rxtx_timer < 0)
+                timer->rxtx_timer = 0;
+            if (*buffer_packets_size == 0 && timer->rxtx_timer == 0) {
+                *state = PSM;
+                timer->psm_timer = ue_new_config.psm_length;
+            }
+            break;
+        case INACTIVE_DRX:
+            timer->inactive_timer--;
+            timer->inactive_edrx_timer--;
+            if (timer->inactive_timer == 0) {
+                *state = ePSM;
+                timer->epsm_timer = ue_new_config.e_length * timer->exp_scalar;
+            } else if (timer->inactive_edrx_timer == 0) {
+                *state = INACTIVE_RX;
+                timer->inactive_rx_timer = ue_new_config.rx_length;
+            }
+            break;
+        case INACTIVE_RX:
+            if (*buffer_packets_size > 0) {
+                *state = RXTX_RECVING;
+                break;
+            }
+            timer->inactive_timer--;
+            timer->inactive_rx_timer--;
+            if (timer->inactive_timer == 0) {
+                *state = ePSM;
+                timer->epsm_timer = ue_new_config.e_length * timer->exp_scalar;
+            } else if (timer->inactive_rx_timer == 0) {
+                *state = INACTIVE_DRX;
+                timer->inactive_edrx_timer = ue_new_config.edrx_length;
+            }
+            break;
+        case PSM:
+            timer->psm_timer--;
+            if (timer->psm_timer == 0) {
+                *state = RXTX_IDLE;
+                timer->rxtx_timer = ue_new_config.cycle_length - ue_new_config.psm_length;
+            }
+            break;
+        case ePSM:
+            timer->epsm_timer--;
+            if (timer->epsm_timer == 0) {
+                timer->exp_scalar *= 2;
+                *state = INACTIVE_DRX;
+                timer->inactive_edrx_timer = ue_new_config.edrx_length;
+                timer->inactive_timer = ue_new_config.inactive_length;
+            }
+            break;
+    }
+    new_receiver_post_processing(timer, state);
 }
 
 void init_thread(int sched_runtime, int sched_deadline, int sched_fifo, cpu_set_t *cpuset, char * name) {
@@ -938,8 +1033,9 @@ void *UE_thread(void *arg) {
 
     /* Initialization for receiver */
     state_timer_t timer;
+    timer.exp_scalar = 1;
     int buffer_packets_size = 0;
-    original_state_t state = RXTX_IDLE;
+    ps_state_t state = RXTX_IDLE;
     timer.rxtx_timer = ue_ori_config.cycle_length - ue_ori_config.psm_length - ue_ori_config.inactive_length;
     timer.cycle_timer = ue_ori_config.cycle_length;
 
@@ -1126,11 +1222,23 @@ void *UE_thread(void *arg) {
                     if (is_sender_ue(UE)) {
                         ue_tx_processing(proc->subframe_rx + proc->frame_rx * 10);
                     } else {
+                        printf("[UE1] Timer: %d %d %d %d %d %d\n",
+                                timer.cycle_timer,
+                                timer.rxtx_timer,
+                                timer.inactive_timer,
+                                timer.inactive_edrx_timer,
+                                timer.inactive_rx_timer,
+                                timer.psm_timer
+                                );
+                        printf("[ES] [UE1] [Subframe %d] State: %d\n",
+                                proc->subframe_rx + proc->frame_rx * 10,
+                                state);
                         if (misc_config.is_original) {
                             // run original state machine
                             original_receiver_state_func(proc, &buffer_packets_size, &timer, &state);
                         } else {
-                            // TODO
+                            // run new state machine
+                            new_receiver_state_func(proc, &buffer_packets_size, &timer, &state);
                         }
                     }
                     LOG_D( PHY, "[SCHED][UE %d] UE RX instance_cnt_rxtx %d subframe %d !!\n", UE->Mod_id, proc->instance_cnt_rxtx,proc->subframe_rx);
